@@ -1,0 +1,42 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Python packaging
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment / secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Generated databases / indexes
+data/blast/
+data/foldseek/
+
+# Generated ML data
+data/ml/
+data/ml_large/
+data/ml_combined/
+data/ml_sequence_only/
+
+# Generated processed data
+data/processed/
+
+# Generated similarity data
+data/similarity/
+
+# Downloaded structure files
+data/structures/large/*.cif
+data/structures/pilot/*.cif
