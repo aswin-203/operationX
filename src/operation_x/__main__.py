@@ -1,8 +1,8 @@
 import argparse
+import json
+from pathlib import Path
 
-from operation_x.ml.real_pipeline_factory import (
-    RealPipelineFactory,
-)
+from operation_x.prediction import predict
 
 from operation_x.ml.large_crystallization_dataset import (
     LargeCrystallizationDataset,
@@ -13,20 +13,22 @@ from operation_x.ml.crystallization_condition_ranker import (
 )
 
 
-BLAST_DATABASE = "data/blast/pilot/pdb_sequences"
-
-STRUCTURE_DATABASE = "data/foldseek/pilot/structures"
-
-FOLDSEEK_PATH = (
-    "/home/aswin/Downloads/foldseek/bin/foldseek"
-)
-
-BLASTP_PATH = "/usr/bin/blastp"
+# ============================================================
+# PATHS
+# ============================================================
 
 LARGE_DATASET = (
     "data/structures/large/records.json"
 )
 
+RECORDS_FILE = Path(
+    "data/structures/large/records.json"
+)
+
+
+# ============================================================
+# ARGUMENTS
+# ============================================================
 
 def parse_arguments():
 
@@ -52,9 +54,17 @@ def parse_arguments():
     return parser.parse_args()
 
 
+# ============================================================
+# FASTA
+# ============================================================
+
 def load_fasta(path):
 
-    with open(path, "r") as file:
+    with open(
+        path,
+        "r",
+        encoding="utf-8",
+    ) as file:
 
         lines = file.readlines()
 
@@ -72,10 +82,12 @@ def load_fasta(path):
 
         sequence_parts.append(line)
 
-    sequence = "".join(sequence_parts)
+    return "".join(sequence_parts)
 
-    return sequence
 
+# ============================================================
+# GET SEQUENCE
+# ============================================================
 
 def get_sequence(args):
 
@@ -117,263 +129,458 @@ def get_sequence(args):
         "ACDEFGHIKLMNPQRSTVWY"
     )
 
-    invalid = set(sequence) - valid_amino_acids
+    invalid = (
+        set(sequence)
+        - valid_amino_acids
+    )
 
     if invalid:
 
         raise ValueError(
             "Invalid amino-acid characters: "
-            + ", ".join(sorted(invalid))
+            + ", ".join(
+                sorted(invalid)
+            )
         )
 
     return sequence
 
 
+# ============================================================
+# HEADER
+# ============================================================
+
 def print_header():
 
     print()
     print("=" * 70)
+
     print(
-        " " * 20 +
-        "OPERATION X"
+        "OPERATION X - "
+        "PROTEIN CRYSTALLIZATION PREDICTION"
     )
-    print(
-        " " * 12 +
-        "PROTEIN CRYSTALLIZATION ANALYSIS"
-    )
+
     print("=" * 70)
 
 
-def print_similarity(evidence):
+# ============================================================
+# PRINT PREDICTIONS
+# ============================================================
 
-    sequence = evidence.get(
-        "sequence_evidence",
-        {},
-    )
-
-    structure = evidence.get(
-        "structure_evidence",
-        {},
-    )
+def print_predictions(
+    predictions
+):
 
     print()
-    print("SIMILARITY")
-    print("-" * 70)
-
-    # ---------------------------------
-    # Sequence similarity
-    # ---------------------------------
-
-    identity = sequence.get(
-        "best_identity"
-    )
-
-    coverage = sequence.get(
-        "best_coverage"
-    )
-
-    strong_sequence_hits = sequence.get(
-        "strong_hit_count",
-        0,
-    )
-
-    if identity is None:
-        print(
-            "Best sequence identity      : "
-            "No significant hit"
-        )
-    else:
-        print(
-            f"Best sequence identity      : "
-            f"{float(identity):.2f} %"
-        )
-
-    if coverage is None:
-        print(
-            "Best sequence coverage      : "
-            "No significant hit"
-        )
-    else:
-        print(
-            f"Best sequence coverage      : "
-            f"{float(coverage) * 100:.2f} %"
-        )
-
-    print(
-        f"Strong sequence hits        : "
-        f"{strong_sequence_hits}"
-    )
+    print("=" * 70)
+    print("FINAL PREDICTIONS")
+    print("=" * 70)
 
     print()
 
-    # ---------------------------------
-    # Structure similarity
-    # ---------------------------------
-
-    tm_score = structure.get(
-        "best_query_tm_score"
+    print(
+        f"Predicted pH             : "
+        f"{predictions['pH']:.2f}"
     )
-
-    rmsd = structure.get(
-        "best_rmsd"
-    )
-
-    strong_structure_hits = structure.get(
-        "strong_hit_count",
-        0,
-    )
-
-    if tm_score is None:
-        print(
-            "Best structure TM-score     : "
-            "Not available"
-        )
-    else:
-        print(
-            f"Best structure TM-score     : "
-            f"{float(tm_score):.4f}"
-        )
-
-    if rmsd is None:
-        print(
-            "Best structure RMSD         : "
-            "Not available"
-        )
-    else:
-        print(
-            f"Best structure RMSD         : "
-            f"{float(rmsd):.4f} Å"
-        )
 
     print(
-        f"Strong structure hits       : "
-        f"{strong_structure_hits}"
+        f"Predicted temperature    : "
+        f"{predictions['temperature_kelvin']:.2f} K"
     )
 
-def print_predictions(predictions):
+    print(
+        f"Predicted Matthews coeff : "
+        f"{predictions['matthews_coefficient']:.3f}"
+    )
+
+    print(
+        f"Predicted solvent        : "
+        f"{predictions['solvent_percent']:.2f}%"
+    )
+
+
+# ============================================================
+# EXPRESSION DETAILS
+# ============================================================
+
+def load_expression_details(
+    pdb_id,
+):
+    """
+    Load documented expression metadata for
+    an experimental PDB record.
+
+    No expression information is inferred.
+
+    If a field is unavailable in the dataset,
+    it is displayed as 'Not reported'.
+    """
+
+    default_result = {
+        "host": "Not reported",
+        "strain": "Not reported",
+        "system": "Not reported",
+        "inducer": "Not reported",
+        "evidence": "Not reported",
+    }
+
+    if not RECORDS_FILE.exists():
+
+        return default_result
+
+    try:
+
+        with RECORDS_FILE.open(
+            "r",
+            encoding="utf-8",
+        ) as handle:
+
+            records = json.load(
+                handle
+            )
+
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ):
+
+        return default_result
+
+    if not isinstance(
+        records,
+        dict,
+    ):
+
+        return default_result
+
+    normalized_id = str(
+        pdb_id
+    ).strip().upper()
+
+    # Handle possible entity suffixes.
+    normalized_id = normalized_id.split(
+        "_"
+    )[0]
+
+    record = records.get(
+        normalized_id
+    )
+
+    if record is None:
+
+        # Fallback search in case the JSON
+        # keys are formatted differently.
+
+        for key, value in records.items():
+
+            key_normalized = str(
+                key
+            ).strip().upper().split(
+                "_"
+            )[0]
+
+            if key_normalized == normalized_id:
+
+                record = value
+                break
+
+    if not isinstance(
+        record,
+        dict,
+    ):
+
+        return default_result
+
+    def get_value(
+        field_name,
+    ):
+
+        value = record.get(
+            field_name
+        )
+
+        if value is None:
+
+            return "Not reported"
+
+        if isinstance(
+            value,
+            str,
+        ):
+
+            value = value.strip()
+
+            if not value:
+                return "Not reported"
+
+        return value
+
+    return {
+        "host": get_value(
+            "expression_host"
+        ),
+
+        "strain": get_value(
+            "expression_strain"
+        ),
+
+        "system": get_value(
+            "expression_system"
+        ),
+
+        "inducer": get_value(
+            "inducer"
+        ),
+
+        "evidence": get_value(
+            "expression_evidence"
+        ),
+    }
+
+
+# ============================================================
+# PRINT RECOMMENDATIONS
+# ============================================================
+
+def print_recommendations(
+    recommendations
+):
 
     print()
-    print("PREDICTED CRYSTAL PROPERTIES")
-    print("-" * 70)
+    print("=" * 70)
 
     print(
-        f"pH                          : "
-        f"{predictions['pH']:.4f}"
+        "TOP EXPERIMENTAL CONDITION "
+        "RECOMMENDATIONS"
     )
 
-    print(
-        f"Temperature                 : "
-        f"{predictions['temperature_kelvin']:.4f} K"
-    )
+    print("=" * 70)
 
-    print(
-        f"Matthews coefficient        : "
-        f"{predictions['matthews_coefficient']:.4f}"
-    )
+    if not recommendations:
 
-    print(
-        f"Solvent percentage          : "
-        f"{predictions['solvent_percent']:.4f} %"
-    )
-
-
-def print_recommendations(results):
-
-    print()
-    print("RECOMMENDED EXPERIMENTAL")
-    print("CRYSTALLIZATION CONDITIONS")
-    print("-" * 70)
-
-    if not results:
+        print()
 
         print(
-            "No compatible experimental "
-            "conditions found."
+            "No experimental recommendations found."
         )
 
         return
 
-    for index, result in enumerate(
-        results,
+    print()
+
+    for index, recommendation in enumerate(
+        recommendations,
         start=1,
     ):
 
+        print(
+            f"Recommendation #{index}"
+        )
+
+        print("-" * 70)
+
+        if isinstance(
+            recommendation,
+            dict,
+        ):
+
+            # ------------------------------------------------
+            # PDB ID
+            # ------------------------------------------------
+
+            pdb_id = recommendation.get(
+                "query_pdb"
+            )
+
+            if pdb_id:
+
+                print(
+                    f"PDB ID: {pdb_id}"
+                )
+
+            # ------------------------------------------------
+            # Ranking score
+            # ------------------------------------------------
+
+            if "score" in recommendation:
+
+                try:
+
+                    print(
+                        f"Score: "
+                        f"{float(recommendation['score']):.4f}"
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    print(
+                        f"Score: "
+                        f"{recommendation['score']}"
+                    )
+
+            # ------------------------------------------------
+            # Crystallization properties
+            # ------------------------------------------------
+
+            if "pH" in recommendation:
+
+                print(
+                    f"pH: "
+                    f"{recommendation['pH']}"
+                )
+
+            if "temperature_kelvin" in recommendation:
+
+                print(
+                    f"Temperature (K): "
+                    f"{recommendation['temperature_kelvin']}"
+                )
+
+            if "matthews_coefficient" in recommendation:
+
+                print(
+                    f"Matthews coefficient: "
+                    f"{recommendation['matthews_coefficient']}"
+                )
+
+            if "solvent_percent" in recommendation:
+
+                print(
+                    f"Solvent (%): "
+                    f"{recommendation['solvent_percent']}"
+                )
+
+            # ------------------------------------------------
+            # Experimental condition text
+            # ------------------------------------------------
+
+            if "condition_text" in recommendation:
+
+                print()
+
+                print(
+                    "Condition:"
+                )
+
+                print(
+                    recommendation[
+                        "condition_text"
+                    ]
+                )
+
+            # ------------------------------------------------
+            # Expression details
+            # ------------------------------------------------
+
+            if pdb_id:
+
+                expression = (
+                    load_expression_details(
+                        pdb_id
+                    )
+                )
+
+                print()
+
+                print(
+                    "EXPRESSION DETAILS"
+                )
+
+                print("-" * 40)
+
+                print(
+                    f"Host              : "
+                    f"{expression['host']}"
+                )
+
+                print(
+                    f"Strain            : "
+                    f"{expression['strain']}"
+                )
+
+                print(
+                    f"Expression system : "
+                    f"{expression['system']}"
+                )
+
+                print(
+                    f"Inducer           : "
+                    f"{expression['inducer']}"
+                )
+
+                print(
+                    f"Evidence           : "
+                    f"{expression['evidence']}"
+                )
+
+            # ------------------------------------------------
+            # Additional recommendation fields
+            # ------------------------------------------------
+
+            displayed = {
+                "query_pdb",
+                "score",
+                "pH",
+                "temperature_kelvin",
+                "matthews_coefficient",
+                "solvent_percent",
+                "condition_text",
+            }
+
+            for key, value in recommendation.items():
+
+                if key in displayed:
+
+                    continue
+
+                print(
+                    f"{key}: {value}"
+                )
+
+        else:
+
+            print(
+                recommendation
+            )
+
         print()
 
-        print(
-            f"{index}. Reference PDB: "
-            f"{result.get('query_pdb', 'unknown')}"
-        )
 
-        print(
-            f"   Compatibility score      : "
-            f"{result['score']:.4f}"
-        )
-
-        temperature = result.get(
-            "temperature_kelvin"
-        )
-
-        if temperature is not None:
-
-            print(
-                f"   Temperature              : "
-                f"{float(temperature):.2f} K"
-            )
-
-        ph = result.get("pH")
-
-        if ph is not None:
-
-            print(
-                f"   pH                       : "
-                f"{float(ph):.2f}"
-            )
-
-        print()
-
-        print(
-            "   Condition:"
-        )
-
-        condition = result.get(
-            "condition_text"
-        )
-
-        if condition:
-
-            print(
-                f"   {condition}"
-            )
-
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
 
     args = parse_arguments()
 
-    sequence = get_sequence(args)
+    sequence = get_sequence(
+        args
+    )
 
-    # ---------------------------------------------
-    # Target identity
-    #
-    # This is NOT a PDB ID.
-    # It is only an internal label for this input.
-    # ---------------------------------------------
-
-    target_id = "INPUT"
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
 
     print_header()
 
     print()
+
     print(
-        "Input type                  : Protein sequence"
+        "Input type                  : "
+        "Protein sequence"
     )
+
     print(
         f"Sequence length             : "
         f"{len(sequence)} aa"
     )
 
     print()
+
     print(
         "Structure required          : NO"
     )
@@ -382,92 +589,111 @@ def main():
         "Target structure used       : NO"
     )
 
-    # ---------------------------------------------
-    # 1. Create the real Operation X pipeline
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 1. OPERATION X PREDICTION
+    # --------------------------------------------------------
 
-    factory = RealPipelineFactory(
-        blast_database=BLAST_DATABASE,
-        structure_database=STRUCTURE_DATABASE,
-        foldseek_path=FOLDSEEK_PATH,
-        blastp_path=BLASTP_PATH,
+    predictions = predict(
+        sequence
     )
 
-    pipeline = factory.create()
-
-    # ---------------------------------------------
-    # 2. Run ML prediction
-    # ---------------------------------------------
-
-    predictions = pipeline.predict(
-        sequence=sequence,
-        pdb_id=target_id,
-        entity={},
-        max_hits=10,
-    )
-
-    # ---------------------------------------------
-    # 3. Get similarity evidence
-    # ---------------------------------------------
-
-    evidence_result = (
-        pipeline.similarity_pipeline.analyze(
-            pdb_id=target_id,
-            sequence=sequence,
-            entity={},
-            max_hits=10,
-        )
-    )
-
-    print_similarity(
-        evidence_result["evidence"]
-    )
-
-    # ---------------------------------------------
-    # 4. Print ML predictions
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 2. DISPLAY PREDICTIONS
+    # --------------------------------------------------------
 
     print_predictions(
         predictions
     )
 
-    # ---------------------------------------------
-    # 5. Rank experimental conditions
-    # ---------------------------------------------
+    # --------------------------------------------------------
+    # 3. LOAD EXPERIMENTAL DATASET
+    # --------------------------------------------------------
+
+    print()
+
+    print(
+        "Loading experimental "
+        "crystallization dataset..."
+    )
 
     dataset = LargeCrystallizationDataset(
         LARGE_DATASET
     )
 
+    # --------------------------------------------------------
+    # 4. CREATE CONDITION RANKER
+    # --------------------------------------------------------
+
     ranker = CrystallizationConditionRanker(
         dataset
     )
 
+    # --------------------------------------------------------
+    # 5. RANK EXPERIMENTAL CONDITIONS
+    # --------------------------------------------------------
+
+    print()
+
+    print(
+        "Ranking experimental "
+        "crystallization conditions..."
+    )
+
     recommendations = ranker.rank(
-        predicted_ph=predictions["pH"],
+        predicted_ph=predictions[
+            "pH"
+        ],
+
         predicted_temperature=predictions[
             "temperature_kelvin"
         ],
+
         predicted_matthews=predictions[
             "matthews_coefficient"
         ],
+
         predicted_solvent=predictions[
             "solvent_percent"
         ],
+
         top_n=5,
     )
+
+    # --------------------------------------------------------
+    # 6. DISPLAY RECOMMENDATIONS
+    # --------------------------------------------------------
 
     print_recommendations(
         recommendations
     )
 
+    # --------------------------------------------------------
+    # COMPLETE
+    # --------------------------------------------------------
+
     print()
+
     print("=" * 70)
+
     print(
         "Operation X analysis complete."
     )
+
     print("=" * 70)
 
+    print()
+
+    print(
+        "Note: predictions are ranked "
+        "experimental-condition estimates, "
+        "not guarantees of crystallization success."
+    )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
+
     main()

@@ -1,6 +1,9 @@
-
 import json
 import time
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+)
 from pathlib import Path
 
 from operation_x.clients.pdb_client import PDBClient
@@ -15,7 +18,7 @@ from operation_x.parsers.expression_mmcif_parser import (
 
 class LargeStructureCollector:
     """
-    Collect a larger, resumable protein structure dataset from RCSB PDB.
+    Fast, resumable protein structure dataset collector.
 
     Workflow:
 
@@ -23,9 +26,9 @@ class LargeStructureCollector:
             ↓
         PDB IDs
             ↓
-        Entry metadata
+        Skip existing records
             ↓
-        Protein polymer entities
+        Parallel record collection
             ↓
         mmCIF download
             ↓
@@ -33,10 +36,12 @@ class LargeStructureCollector:
             ↓
         Expression metadata
             ↓
-        JSON records
+        Batch save to records.json
 
-    The collector is intentionally resumable. Existing records are
-    skipped on subsequent runs.
+    Existing records are skipped automatically.
+
+    Collection uses multiple worker threads so that network-bound
+    RCSB API requests and mmCIF downloads can happen concurrently.
     """
 
     def __init__(
@@ -45,6 +50,8 @@ class LargeStructureCollector:
         records_file: str = "data/structures/large/records.json",
         timeout: int = 30,
         delay: float = 0.1,
+        max_workers: int = 8,
+        save_every: int = 25,
     ):
         self.output_directory = Path(
             output_directory
@@ -64,6 +71,15 @@ class LargeStructureCollector:
             exist_ok=True,
         )
 
+        self.timeout = timeout
+        self.delay = delay
+        self.max_workers = max_workers
+        self.save_every = save_every
+
+        # -----------------------------------------------------
+        # Clients
+        # -----------------------------------------------------
+
         self.pdb_client = PDBClient(
             timeout=timeout
         )
@@ -78,17 +94,20 @@ class LargeStructureCollector:
             ExpressionMMCIFParser()
         )
 
-        self.delay = delay
-
     # ---------------------------------------------------------
     # Persistence
     # ---------------------------------------------------------
 
     def _load_records(self) -> dict:
+        """
+        Load existing records from records.json.
+        """
+
         if not self.records_file.exists():
             return {}
 
         try:
+
             with self.records_file.open(
                 "r",
                 encoding="utf-8",
@@ -113,6 +132,9 @@ class LargeStructureCollector:
         self,
         records: dict,
     ) -> None:
+        """
+        Atomically save records.json.
+        """
 
         temporary_file = (
             self.records_file.with_suffix(
@@ -146,6 +168,9 @@ class LargeStructureCollector:
         batch_size: int = 100,
         start: int = 0,
     ) -> list[str]:
+        """
+        Discover protein X-ray PDB IDs from RCSB.
+        """
 
         if limit <= 0:
             raise ValueError(
@@ -199,11 +224,15 @@ class LargeStructureCollector:
     # ---------------------------------------------------------
     # Entity selection
     # ---------------------------------------------------------
+
     def _find_protein_entity(
         self,
         pdb_id: str,
         entry: dict,
     ) -> str | None:
+        """
+        Find the first protein polymer entity.
+        """
 
         identifiers = entry.get(
             "rcsb_entry_container_identifiers",
@@ -240,7 +269,8 @@ class LargeStructureCollector:
                 return str(entity_id)
 
         return None
-    #-------------------------------------------------
+
+    # ---------------------------------------------------------
     # Record construction
     # ---------------------------------------------------------
 
@@ -248,6 +278,31 @@ class LargeStructureCollector:
         self,
         pdb_id: str,
     ) -> dict:
+        """
+        Collect one complete PDB record.
+
+        Includes:
+
+        - sequence
+        - source organism
+        - UniProt
+        - experimental method
+        - molecular weight
+        - resolution
+        - publication information
+        - crystallization conditions
+        - pH
+        - temperature
+        - pressure
+        - Matthews coefficient
+        - solvent percentage
+        - expression host
+        - expression strain
+        - expression system
+        - inducer
+        - expression evidence
+        - local CIF path
+        """
 
         pdb_id = (
             pdb_id.upper()
@@ -259,11 +314,19 @@ class LargeStructureCollector:
                 "PDB ID cannot be empty"
             )
 
+        # -----------------------------------------------------
+        # Entry metadata
+        # -----------------------------------------------------
+
         entry = (
             self.pdb_client.get_entry(
                 pdb_id
             )
         )
+
+        # -----------------------------------------------------
+        # Protein entity
+        # -----------------------------------------------------
 
         entity_id = (
             self._find_protein_entity(
@@ -289,6 +352,10 @@ class LargeStructureCollector:
             {},
         )
 
+        # -----------------------------------------------------
+        # Sequence
+        # -----------------------------------------------------
+
         sequence = (
             entity_poly.get(
                 "pdbx_seq_one_letter_code_can"
@@ -308,9 +375,9 @@ class LargeStructureCollector:
                 f"No protein sequence found for {pdb_id}"
             )
 
-        # ---------------------------------------------
+        # -----------------------------------------------------
         # Source organism
-        # ---------------------------------------------
+        # -----------------------------------------------------
 
         source = entity.get(
             "rcsb_entity_source_organism",
@@ -320,13 +387,16 @@ class LargeStructureCollector:
         source_organism = None
 
         if source:
-            source_organism = source[0].get(
-                "scientific_name"
+
+            source_organism = (
+                source[0].get(
+                    "scientific_name"
+                )
             )
 
-        # ---------------------------------------------
+        # -----------------------------------------------------
         # Container identifiers
-        # ---------------------------------------------
+        # -----------------------------------------------------
 
         container = entity.get(
             "rcsb_polymer_entity_container_identifiers",
@@ -344,18 +414,18 @@ class LargeStructureCollector:
             else None
         )
 
-        # ---------------------------------------------
+        # -----------------------------------------------------
         # Experimental information
-        # ---------------------------------------------
+        # -----------------------------------------------------
 
         entry_info = entry.get(
             "rcsb_entry_info",
             {},
         )
 
-        # ---------------------------------------------
+        # -----------------------------------------------------
         # Citation
-        # ---------------------------------------------
+        # -----------------------------------------------------
 
         citations = entry.get(
             "citation",
@@ -383,9 +453,9 @@ class LargeStructureCollector:
             primary_citation or {}
         )
 
-        # ---------------------------------------------
-        # mmCIF
-        # ---------------------------------------------
+        # -----------------------------------------------------
+        # Download mmCIF
+        # -----------------------------------------------------
 
         cif = (
             self.pdb_client.download_mmcif(
@@ -403,9 +473,9 @@ class LargeStructureCollector:
             encoding="utf-8",
         )
 
-        # ---------------------------------------------
+        # -----------------------------------------------------
         # Crystallization
-        # ---------------------------------------------
+        # -----------------------------------------------------
 
         crystallization = (
             self.mmcif_parser.parse_crystallization(
@@ -413,9 +483,9 @@ class LargeStructureCollector:
             )
         )
 
-        # ---------------------------------------------
+        # -----------------------------------------------------
         # Expression
-        # ---------------------------------------------
+        # -----------------------------------------------------
 
         expression = (
             self.expression_mmcif_parser.parse(
@@ -423,72 +493,173 @@ class LargeStructureCollector:
             )
         )
 
+        # -----------------------------------------------------
+        # Final record
+        # -----------------------------------------------------
+
         return {
             "pdb_id": pdb_id,
+
             "entity_id": entity_id,
+
             "sequence": sequence,
+
             "sequence_length": len(
                 sequence
             ),
+
             "uniprot_id": uniprot_id,
-            "source_organism": source_organism,
+
+            "source_organism": (
+                source_organism
+            ),
+
             "experimental_method": (
                 entry_info.get(
                     "experimental_method"
                 )
             ),
+
             "molecular_weight": (
                 entry_info.get(
                     "molecular_weight"
                 )
             ),
+
             "resolution": (
                 entry_info.get(
                     "resolution_combined"
                 )
             ),
+
             "pubmed_id": (
                 primary_citation.get(
                     "pdbx_database_id_PubMed"
                 )
             ),
+
             "doi": (
                 primary_citation.get(
                     "pdbx_database_id_DOI"
                 )
             ),
+
+            # ---------------------------------------------
+            # Crystallization
+            # ---------------------------------------------
+
             "crystallization_available": (
                 crystallization.available
             ),
+
             "crystallization_method": (
                 crystallization.method
             ),
-            "pH": crystallization.pH,
+
+            "pH": (
+                crystallization.pH
+            ),
+
             "temperature_kelvin": (
                 crystallization.temperature_kelvin
             ),
-            "pressure": crystallization.pressure,
+
+            "pressure": (
+                crystallization.pressure
+            ),
+
             "crystallization_time": (
                 crystallization.time
             ),
+
             "crystallization_details": (
                 crystallization.details
             ),
+
             "matthews_coefficient": (
                 crystallization.matthews_coefficient
             ),
+
             "solvent_percent": (
                 crystallization.solvent_percent
             ),
-            "expression_host": expression.host,
-            "expression_strain": expression.strain,
-            "expression_system": expression.system,
-            "inducer": expression.inducer,
-            "expression_evidence": expression.evidence,
+
+            # ---------------------------------------------
+            # Expression
+            # ---------------------------------------------
+
+            "expression_host": (
+                expression.host
+            ),
+
+            "expression_strain": (
+                expression.strain
+            ),
+
+            "expression_system": (
+                expression.system
+            ),
+
+            "inducer": (
+                expression.inducer
+            ),
+
+            "expression_evidence": (
+                expression.evidence
+            ),
+
+            # ---------------------------------------------
+            # Structure
+            # ---------------------------------------------
+
             "structure_path": str(
                 structure_path
             ),
         }
+
+    # ---------------------------------------------------------
+    # Worker
+    # ---------------------------------------------------------
+
+    def _collect_one(
+        self,
+        pdb_id: str,
+    ) -> tuple[str, dict | None, str | None]:
+        """
+        Worker function used by ThreadPoolExecutor.
+
+        Returns:
+
+            (pdb_id, record, error)
+
+        """
+
+        try:
+
+            if self.delay > 0:
+                time.sleep(
+                    self.delay
+                )
+
+            record = (
+                self.collect_record(
+                    pdb_id
+                )
+            )
+
+            return (
+                pdb_id,
+                record,
+                None,
+            )
+
+        except Exception as error:
+
+            return (
+                pdb_id,
+                None,
+                str(error),
+            )
 
     # ---------------------------------------------------------
     # Dataset collection
@@ -499,101 +670,280 @@ class LargeStructureCollector:
         limit: int = 100,
         start: int = 0,
     ) -> dict:
+        """
+        Collect a requested number of NEW records.
+
+        Existing records are skipped.
+
+        Collection is performed in parallel using
+        ThreadPoolExecutor.
+        """
 
         if limit <= 0:
             raise ValueError(
                 "limit must be greater than zero"
             )
 
-        records = self._load_records()
+        if self.max_workers <= 0:
+            raise ValueError(
+                "max_workers must be greater than zero"
+            )
 
-        pdb_ids = self.discover_pdb_ids(
-            limit=limit,
-            start=start,
-        )
+        if self.save_every <= 0:
+            raise ValueError(
+                "save_every must be greater than zero"
+            )
+
+        records = self._load_records()
 
         successful = 0
         failed = []
 
+        current_start = start
+        discovered_total = 0
+
+        print()
         print(
             "=" * 60
         )
         print(
-            "OPERATION X — LARGE STRUCTURE DATASET"
+            "OPERATION X — FAST LARGE DATASET COLLECTION"
         )
         print(
             "=" * 60
         )
         print()
         print(
-            f"Requested: {limit}"
+            f"Requested new records : {limit}"
         )
         print(
-            f"Discovered: {len(pdb_ids)}"
+            f"Existing records      : {len(records)}"
+        )
+        print(
+            f"Worker threads        : {self.max_workers}"
+        )
+        print(
+            f"Save every            : {self.save_every}"
         )
         print()
 
-        for index, pdb_id in enumerate(
-            pdb_ids,
-            start=1,
-        ):
+        # -----------------------------------------------------
+        # Thread pool
+        # -----------------------------------------------------
 
-            print(
-                f"[{index}/{len(pdb_ids)}] "
-                f"{pdb_id}"
-            )
+        with ThreadPoolExecutor(
+            max_workers=self.max_workers
+        ) as executor:
 
-            if pdb_id in records:
+            while successful < limit:
 
-                print(
-                    f"{pdb_id} -> "
-                    "SKIPPED (already collected)"
+                # ---------------------------------------------
+                # Discover a reasonably large page
+                # ---------------------------------------------
+
+                remaining = (
+                    limit - successful
                 )
-                print()
 
-                successful += 1
-                continue
+                discovery_size = max(
+                    100,
+                    min(
+                        500,
+                        remaining * 3,
+                    ),
+                )
 
-            try:
-
-                record = (
-                    self.collect_record(
-                        pdb_id
+                pdb_ids = (
+                    self.discover_pdb_ids(
+                        limit=discovery_size,
+                        start=current_start,
                     )
                 )
 
-                records[pdb_id] = record
+                if not pdb_ids:
+
+                    print()
+                    print(
+                        "No more PDB IDs found."
+                    )
+
+                    break
+
+                discovered_total += len(
+                    pdb_ids
+                )
+
+                # Move pagination forward immediately.
+                current_start += len(
+                    pdb_ids
+                )
+
+                # ---------------------------------------------
+                # Remove already collected IDs
+                # ---------------------------------------------
+
+                new_ids = []
+
+                for pdb_id in pdb_ids:
+
+                    if pdb_id in records:
+
+                        print(
+                            f"{pdb_id} -> "
+                            "SKIPPED"
+                        )
+
+                        continue
+
+                    new_ids.append(
+                        pdb_id
+                    )
+
+                    if len(new_ids) >= remaining:
+                        break
+
+                if not new_ids:
+                    continue
+
+                print()
+                print(
+                    f"Submitting {len(new_ids)} "
+                    "new records..."
+                )
+                print()
+
+                # ---------------------------------------------
+                # Submit parallel jobs
+                # ---------------------------------------------
+
+                futures = {
+                    executor.submit(
+                        self._collect_one,
+                        pdb_id,
+                    ): pdb_id
+                    for pdb_id in new_ids
+                }
+
+                batch_success = 0
+
+                # ---------------------------------------------
+                # Process completed jobs
+                # ---------------------------------------------
+
+                for future in as_completed(
+                    futures
+                ):
+
+                    pdb_id = futures[
+                        future
+                    ]
+
+                    try:
+
+                        (
+                            result_pdb_id,
+                            record,
+                            error,
+                        ) = future.result()
+
+                    except Exception as error:
+
+                        result_pdb_id = pdb_id
+                        record = None
+                        error = str(error)
+
+                    if (
+                        record is not None
+                        and error is None
+                    ):
+
+                        records[
+                            result_pdb_id
+                        ] = record
+
+                        successful += 1
+                        batch_success += 1
+
+                        print(
+                            f"[{successful}/{limit}] "
+                            f"{result_pdb_id} -> SUCCESS"
+                        )
+
+                    else:
+
+                        failed.append(
+                            {
+                                "pdb_id": result_pdb_id,
+                                "error": error,
+                            }
+                        )
+
+                        print(
+                            f"{result_pdb_id} -> "
+                            f"ERROR: {error}"
+                        )
+
+                    # -----------------------------------------
+                    # Batch save
+                    # -----------------------------------------
+
+                    if (
+                        batch_success > 0
+                        and (
+                            batch_success
+                            % self.save_every
+                            == 0
+                        )
+                    ):
+
+                        self._save_records(
+                            records
+                        )
+
+                        print(
+                            f"Saved checkpoint: "
+                            f"{len(records)} records"
+                        )
+
+                # ---------------------------------------------
+                # Save after every submitted batch
+                # ---------------------------------------------
 
                 self._save_records(
                     records
                 )
 
-                successful += 1
-
+                print()
                 print(
-                    f"{pdb_id} -> SUCCESS"
+                    "Batch complete:"
                 )
-
-            except Exception as error:
-
-                failed.append(
-                    {
-                        "pdb_id": pdb_id,
-                        "error": str(error),
-                    }
-                )
-
                 print(
-                    f"{pdb_id} -> ERROR: "
-                    f"{error}"
+                    f"  New records: {batch_success}"
                 )
+                print(
+                    f"  Total records: {len(records)}"
+                )
+                print(
+                    f"  Successful: {successful}/{limit}"
+                )
+                print(
+                    f"  Failed: {len(failed)}"
+                )
+                print()
 
-            print()
+        # -----------------------------------------------------
+        # Final save
+        # -----------------------------------------------------
 
-            time.sleep(
-                self.delay
-            )
+        self._save_records(
+            records
+        )
 
+        # -----------------------------------------------------
+        # Summary
+        # -----------------------------------------------------
+
+        print()
         print(
             "=" * 60
         )
@@ -603,28 +953,47 @@ class LargeStructureCollector:
         print(
             "=" * 60
         )
+        print()
+
         print(
-            f"Requested : {limit}"
+            f"Requested new records : {limit}"
         )
+
         print(
-            f"Discovered: {len(pdb_ids)}"
+            f"Discovered             : "
+            f"{discovered_total}"
         )
+
         print(
-            f"Successful: {successful}"
+            f"Successful new records : "
+            f"{successful}"
         )
+
         print(
-            f"Failed    : {len(failed)}"
+            f"Failed                 : "
+            f"{len(failed)}"
         )
+
         print(
-            f"Records   : {self.records_file}"
+            f"Total records          : "
+            f"{len(records)}"
         )
+
         print(
-            f"Structures: {self.output_directory}"
+            f"Records file           : "
+            f"{self.records_file}"
         )
+
+        print(
+            f"Structures directory   : "
+            f"{self.output_directory}"
+        )
+
+        print()
 
         return {
             "requested": limit,
-            "discovered": len(pdb_ids),
+            "discovered": discovered_total,
             "successful": successful,
             "failed": failed,
             "records_file": str(
@@ -634,4 +1003,3 @@ class LargeStructureCollector:
                 self.output_directory
             ),
         }
-

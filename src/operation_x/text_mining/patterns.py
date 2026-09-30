@@ -22,4 +22,5 @@ EXPRESSION_KEYWORDS = [
 INDUCER_PATTERNS = [
     r"\bIPTG\b",
     r"\bgalactose\b",
+    r"\barabinose\b",
 ]

@@ -1,7 +1,5 @@
 import re
 
-from operation_x.text_mining.article_fetcher import ArticleFetcher
-
 from .patterns import (
     EXPRESSION_HOST_PATTERNS,
     EXPRESSION_KEYWORDS,
@@ -24,14 +22,18 @@ class ExpressionExtractor:
             "evidence": [],
         }
 
+        # --------------------------------
+        # Expression host
+        # --------------------------------
+
         host_match = self._find_first(
             text,
             EXPRESSION_HOST_PATTERNS,
         )
 
         if host_match:
-            result["expression_host"] = self._normalize_host(
-                host_match
+            result["expression_host"] = (
+                self._normalize_host(host_match)
             )
 
             result["expression_system"] = (
@@ -42,6 +44,10 @@ class ExpressionExtractor:
                 self._extract_strain(text)
             )
 
+        # --------------------------------
+        # Inducer
+        # --------------------------------
+
         inducer_match = self._find_first(
             text,
             INDUCER_PATTERNS,
@@ -50,12 +56,21 @@ class ExpressionExtractor:
         if inducer_match:
             result["inducer"] = inducer_match
 
+        # --------------------------------
+        # Evidence
+        # --------------------------------
+
         result["evidence"] = self._find_evidence(text)
 
         return result
 
     @staticmethod
-    def _find_first(text: str, patterns: list[str]):
+    def _find_first(
+        text: str,
+        patterns: list[str],
+    ):
+        """Return the first matching expression pattern."""
+
         for pattern in patterns:
             match = re.search(
                 pattern,
@@ -70,6 +85,8 @@ class ExpressionExtractor:
 
     @staticmethod
     def _extract_strain(text: str):
+        """Extract a known expression strain."""
+
         match = re.search(
             r"\bBL21(?:\(DE3\))?",
             text,
@@ -83,6 +100,8 @@ class ExpressionExtractor:
 
     @staticmethod
     def _normalize_host(host: str) -> str:
+        """Normalize common expression-host names."""
+
         if re.search(
             r"E\.?\s*coli",
             host,
@@ -93,26 +112,86 @@ class ExpressionExtractor:
         if host.upper().startswith("BL21"):
             return "Escherichia coli"
 
+        if re.search(
+            r"HEK293",
+            host,
+            re.IGNORECASE,
+        ):
+            return "HEK293"
+
+        if re.search(
+            r"SF9",
+            host,
+            re.IGNORECASE,
+        ):
+            return "Sf9"
+
+        if re.search(
+            r"Pichia\s+pastoris",
+            host,
+            re.IGNORECASE,
+        ):
+            return "Pichia pastoris"
+
+        if re.search(
+            r"Saccharomyces\s+cerevisiae",
+            host,
+            re.IGNORECASE,
+        ):
+            return "Saccharomyces cerevisiae"
+
+        if re.search(
+            r"CHO\s+cells?",
+            host,
+            re.IGNORECASE,
+        ):
+            return "CHO cells"
+
+        if re.search(
+            r"insect\s+cells?",
+            host,
+            re.IGNORECASE,
+        ):
+            return "insect cells"
+
         return host
 
     @staticmethod
     def _infer_expression_system(host: str) -> str:
+        """Infer the broad expression system from the host."""
+
+        host_lower = host.lower()
+
         if (
-            "coli" in host.lower()
+            "coli" in host_lower
             or host.upper().startswith("BL21")
         ):
             return "bacterial"
 
-        if host.lower() in {
-            "sf9",
-            "insect cells",
-        }:
+        if (
+            "sf9" in host_lower
+            or "insect" in host_lower
+        ):
             return "insect"
+
+        if (
+            "hek293" in host_lower
+            or "cho" in host_lower
+        ):
+            return "mammalian"
+
+        if (
+            "pichia" in host_lower
+            or "saccharomyces" in host_lower
+        ):
+            return "yeast"
 
         return "unknown"
 
     @staticmethod
     def _find_evidence(text: str) -> list[str]:
+        """Return sentences containing expression-related keywords."""
+
         sentences = re.split(
             r"(?<=[.!?])\s+",
             text,
@@ -130,4 +209,3 @@ class ExpressionExtractor:
                 evidence.append(sentence.strip())
 
         return evidence
-

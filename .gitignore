@@ -40,3 +40,24 @@ data/similarity/
 # Downloaded structure files
 data/structures/large/*.cif
 data/structures/pilot/*.cif
+
+
+# Generated trained models
+models/
+
+# Generated reports
+reports/
+# Generated trained models
+models/
+
+# Generated reports
+reports/
+
+# Generated trained models
+models/
+
+# Generated reports
+reports/
+
+# Pytest temporary directory
+pytest-temp/
